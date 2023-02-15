@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 	"usnet/uscall"
 
 	"github.com/stretchr/testify/assert"
@@ -54,7 +55,7 @@ func TestDescWrite(t *testing.T) {
 	}()
 
 	<-wait
-	assert.NoError(t, err, "read data failure.")
+	assert.NoError(t, err, "write data failure.")
 	assert.Equal(t, input, output)
 }
 
@@ -63,17 +64,95 @@ func TestDescReadBlock(t *testing.T) {
 
 	fd, err := uscall.UscallAccept(sockfd, nil, nil)
 	assert.NoError(t, err, "accept  failure.")
+	uscall.UscallIoctlNonBio(fd, 1)
 
 	desc := testNewDesc(fd)
 	cs := uscall.AllocCSlice(1024, 1024)
 	data := []byte("data_xxx")
 
-	// go client.Write(data)
-	_ = client
+	go func() {
+		time.Sleep(3 * time.Second)
+		client.Write(data)
+	}()
+
 	rlen, err := desc.read(cs)
 
 	assert.NoError(t, err, "read data failure.")
 	assert.Equal(t, data, uscall.CSlice2Bytes(cs)[:rlen])
+}
+
+func TestDescWriteBlock(t *testing.T) {
+	client := testDail(t)
+
+	fd, err := uscall.UscallAccept(sockfd, nil, nil)
+	assert.NoError(t, err, "accept  failure.")
+	uscall.UscallIoctlNonBio(fd, 1)
+
+	desc := testNewDesc(fd)
+
+	input := testCBytes([]byte("data_xxxx"))
+	wait := make(chan struct{})
+	output := make([]byte, 1024)
+
+	total := 1000000
+	go func() {
+		time.Sleep(5 * time.Second)
+		for rlen := 0; rlen < len(input)*total; {
+			n, err := client.Read(output)
+			assert.NoError(t, err, "read failure")
+			rlen += n
+		}
+
+		close(wait)
+	}()
+
+	for i := 0; i <= total; i++ {
+		_, err = desc.write(uscall.Bytes2CSlice(input))
+		assert.NoError(t, err, "write failure")
+	}
+
+	<-wait
+	assert.NoError(t, err, "write data failure.")
+	// assert.Equal(t, input, output)
+}
+
+func TestDescEcho(t *testing.T) {
+	client := testDail(t)
+	defer client.Close()
+
+	fd, err := uscall.UscallAccept(sockfd, nil, nil)
+	assert.NoError(t, err, "accept  failure.")
+	uscall.UscallIoctlNonBio(fd, 1)
+
+	desc := testNewDesc(fd)
+	defer desc.close()
+
+	go func() {
+		buff := make([]byte, 1024)
+		for {
+			if n, err := client.Read(buff); err != nil {
+				break
+			} else {
+				client.Write(buff[:n])
+			}
+		}
+	}()
+
+	input := testCBytes([]byte("data_xxxx"))
+	output := uscall.AllocCSlice(1024, 1024)
+	for i := 0; i < 2048; i++ {
+		n, err := desc.write(uscall.Bytes2CSlice(input))
+		assert.NoError(t, err, "write failure")
+		assert.Equal(t, len(input), n)
+
+		_, err = desc.read(output)
+		assert.NoError(t, err, "read failure")
+		assert.Equal(t, input, uscall.CSlice2Bytes(output)[:n])
+	}
+}
+
+func TestConnRead(t *testing.T) {
+
 }
 
 var (
@@ -106,6 +185,8 @@ func testDescInit() {
 		if err != nil {
 			panic(err)
 		}
+
+		go poller.poll()
 
 		// create tcp socket
 		sockfd, err = uscall.UscallSocket(uscall.AF_INET, uscall.SOCK_STREAM, 0)

@@ -35,18 +35,22 @@ type desc struct {
 	ev     *uscall.Epoll_event
 }
 
-func (d *desc) netpoller_add_event(ref *int64, event uint32) error {
+func (fd *desc) netpoller_add_event(ref *int64, event uint32) error {
 	if atomic.AddInt64(ref, 1)-1 == 0 {
-		if d.ev == nil {
-			ev := (&uscall.Epoll_event{}).SetEvents(event | uscall.EPOLLERR)
-			if err := d.poller.ctl_add(d.fd, ev); err != nil {
+		fd.irqHandler.Lock()
+		defer fd.irqHandler.Unlock()
+
+		if fd.ev == nil {
+			ev := (&uscall.Epoll_event{}).SetEvents(event | uscall.EPOLLERR).
+				SetSocket(fd.fd)
+			if err := fd.poller.ctl_add(fd, ev); err != nil {
 				return err
 			}
-			d.ev = ev
+			fd.ev = ev
 		} else {
-			d.ev.SetEvents(d.ev.Event() | event)
-			if err := d.poller.ctl_modify(d.fd, d.ev); err != nil {
-				d.ev.SetEvents(d.ev.Event() & ^event) // rollback events
+			fd.ev.SetEvents(fd.ev.Event() | event)
+			if err := fd.poller.ctl_modify(fd, fd.ev); err != nil {
+				fd.ev.SetEvents(fd.ev.Event() & ^event) // rollback events
 				return err
 			}
 		}
@@ -55,19 +59,22 @@ func (d *desc) netpoller_add_event(ref *int64, event uint32) error {
 	return nil
 }
 
-func (d *desc) netpoller_delete_event(ref *int64, event uint32) error {
+func (fd *desc) netpoller_delete_event(ref *int64, event uint32) error {
 	if atomic.AddInt64(ref, -1) == 0 {
-		if d.ev == nil {
+		fd.irqHandler.Lock()
+		defer fd.irqHandler.Unlock()
+
+		if fd.ev == nil {
 			return nil
 		}
 
-		if nev := d.ev.Event() & ^event; nev == uscall.EPOLLERR {
-			d.poller.ctl_delete(d.fd, d.ev)
-			d.ev = nil
+		if nev := fd.ev.Event() & ^event; nev == uscall.EPOLLERR {
+			fd.poller.ctl_delete(fd, fd.ev)
+			fd.ev = nil
 		} else {
-			d.ev.SetEvents(nev)
-			if err := d.poller.ctl_modify(d.fd, d.ev); err != nil {
-				d.ev.SetEvents(d.ev.Event() & ^nev) // rollback events
+			fd.ev.SetEvents(nev)
+			if err := fd.poller.ctl_modify(fd, fd.ev); err != nil {
+				fd.ev.SetEvents(fd.ev.Event() & ^nev) // rollback events
 				return err
 			}
 		}
@@ -170,7 +177,7 @@ func (fd *desc) write(cs *uscall.CSlice) (int, error) {
 func (fd *desc) close() (err error) {
 	if fd.status&CLOSED == 0 {
 		if fd.ev != nil {
-			fd.poller.ctl_delete(fd.fd, fd.ev)
+			fd.poller.ctl_delete(fd, fd.ev)
 			fd.ev = nil
 		}
 		_, err = uscall.UscallClose(fd.fd)

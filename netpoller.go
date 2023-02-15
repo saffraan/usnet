@@ -1,9 +1,15 @@
 package usnet
 
-import "usnet/uscall"
+import (
+	"errors"
+	"sync"
+	"syscall"
+	"usnet/uscall"
+)
 
 type netpoller struct {
-	epfd int32
+	epfd     int32
+	fdIndexs sync.Map
 }
 
 func createNetPoller() (*netpoller, error) {
@@ -22,18 +28,59 @@ func (p *netpoller) close() {
 	}
 }
 
-func (p *netpoller) ctl_add(fd int32, ev *uscall.Epoll_event) error {
-	_, err := uscall.UscallEpollCtl(p.epfd, uscall.EPOLL_CTL_ADD, fd, ev)
-	return err
-}
-
-func (p *netpoller) ctl_modify(fd int32, ev *uscall.Epoll_event) error {
-	_, err := uscall.UscallEpollCtl(p.epfd, uscall.EPOLL_CTL_ADD, fd, ev)
-	return err
-}
-
-func (p *netpoller) ctl_delete(fd int32, ev *uscall.Epoll_event) error {
+func (p *netpoller) ctl_add(fd *desc, ev *uscall.Epoll_event) error {
+	if _, err := uscall.UscallEpollCtl(p.epfd, uscall.EPOLL_CTL_ADD, fd.fd, ev); err != nil {
+		return err
+	}
+	p.fdIndexs.Store(fd.fd, fd)
 	return nil
+}
+
+func (p *netpoller) ctl_modify(fd *desc, ev *uscall.Epoll_event) error {
+	if _, ok := p.fdIndexs.Load(fd.fd); !ok {
+		return errors.New("the specify fd has not been added into poller")
+	}
+	if _, err := uscall.UscallEpollCtl(p.epfd, uscall.EPOLL_CTL_ADD, fd.fd, ev); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *netpoller) ctl_delete(fd *desc, ev *uscall.Epoll_event) error {
+	if _, ok := p.fdIndexs.LoadAndDelete(fd.fd); !ok {
+		return errors.New("the specify fd has not been added into poller")
+	}
+	if _, err := uscall.UscallEpollCtl(p.epfd, uscall.EPOLL_CTL_DEL, fd.fd, ev); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *netpoller) handle(ev *uscall.Epoll_event) {
+	var efd *desc
+	if fd, ok := p.fdIndexs.Load(ev.Socket()); !ok {
+		return
+	} else {
+		efd = fd.(*desc)
+	}
+
+	if ev.Event()&uscall.EPOLLIN != 0 {
+		efd.irqHandler.interrupt(INT_SRC_POLLER, equalMf(INT_SIG_INPUT, nil), false, func() {
+			efd.status |= READABLE
+		})
+	}
+
+	if ev.Event()&uscall.EPOLLOUT != 0 {
+		efd.irqHandler.interrupt(INT_SRC_POLLER, equalMf(INT_SIG_OUTPUT, nil), false, func() {
+			efd.status |= WRITEABLE
+		})
+	}
+
+	if ev.Event()&uscall.EPOLLERR != 0 {
+		efd.irqHandler.interrupt(INT_SRC_POLLER, errorMf(syscall.EINVAL), true, func() {
+			efd.status |= ERROR
+		})
+	}
 }
 
 func (p *netpoller) poll() {
@@ -45,7 +92,7 @@ func (p *netpoller) poll() {
 		}
 
 		for i := 0; i < nevents; i++ {
-
+			p.handle(&events[i])
 		}
 	}
 }
