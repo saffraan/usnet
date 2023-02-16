@@ -305,17 +305,18 @@ func (c *conn) safeRead(b []byte) (n int, err error) {
 	c.rCtx.l.Lock()
 	defer c.rCtx.l.Unlock()
 
-	for buff := c.rCtx.buffer; ; c.rCtx.seq++ {
+	for buff, next := c.rCtx.buffer, true; next; c.rCtx.seq++ {
 		if buff.Len() <= 0 { // First, Fill read buffer if the buffer is empty.
 			var nread = 0
 			if nread, err = c.fd.read(buff.entity); err != nil {
 				return
 			}
 			buff.setLen(nread)
+			next = false
 		}
 
 		if n += buff.Read(b); n == len(b) { // Second , read from the buffer.
-			break
+			next = false
 		}
 	}
 
@@ -338,7 +339,7 @@ func (c *conn) safeWrite(b []byte) (clen int, err error) {
 	defer c.wCtx.l.Unlock()
 
 	buff := c.wCtx.buffer.setPos(0).setLen(0) // clean write buffer
-	for dataLen := len(b); clen < dataLen; c.wCtx.seq++ {
+	for dataLen := len(b); clen < dataLen && err == nil; c.wCtx.seq++ {
 		if len(b) > 0 {
 			b = b[buff.Append(b):] // First: append add into write buffer
 		}
@@ -347,10 +348,6 @@ func (c *conn) safeWrite(b []byte) (clen int, err error) {
 		if nwrite, err = c.fd.write(uscall.Bytes2CSlice(buff.Data())); nwrite > 0 { // Second: write data
 			clen += nwrite
 			buff.move(nwrite)
-		}
-
-		if err != nil {
-			break
 		}
 	}
 
