@@ -4,129 +4,14 @@
 package usnet
 
 import (
-	"fmt"
-	"net"
+	"io"
 	"os"
-	"sync"
+	"syscall"
 	"testing"
 	"time"
-	"usnet/uscall"
 
 	"github.com/stretchr/testify/assert"
 )
-
-func TestDescRead(t *testing.T) {
-	client := testDail(t)
-	desc := testNewDesc(testAccept(t))
-
-	cs := uscall.AllocCSlice(1024, 1024)
-	data := []byte("data_xxx")
-	go client.Write(data)
-	rlen, err := desc.read(cs)
-
-	assert.NoError(t, err, "read data failure.")
-	assert.Equal(t, data, uscall.CSlice2Bytes(cs)[:rlen])
-}
-
-func TestDescWrite(t *testing.T) {
-	client := testDail(t)
-	desc := testNewDesc(testAccept(t))
-
-	input := testCBytes([]byte("data_xxxx"))
-
-	_, err := desc.write(uscall.Bytes2CSlice(input))
-	assert.NoError(t, err, "write failure")
-
-	wait := make(chan struct{})
-	output := make([]byte, 1024)
-	go func() {
-		rlen, err := client.Read(output)
-		assert.NoError(t, err, "read failure")
-		output = output[:rlen]
-		close(wait)
-	}()
-
-	<-wait
-	assert.NoError(t, err, "write data failure.")
-	assert.Equal(t, input, output)
-}
-
-func TestDescReadBlock(t *testing.T) {
-	client := testDail(t)
-	desc := testNewDesc(testAccept(t))
-
-	cs := uscall.AllocCSlice(1024, 1024)
-	data := []byte("data_xxx")
-
-	go func() {
-		time.Sleep(3 * time.Second)
-		client.Write(data)
-	}()
-
-	rlen, err := desc.read(cs)
-
-	assert.NoError(t, err, "read data failure.")
-	assert.Equal(t, data, uscall.CSlice2Bytes(cs)[:rlen])
-}
-
-func TestDescWriteBlock(t *testing.T) {
-	client := testDail(t)
-	desc := testNewDesc(testAccept(t))
-
-	input := testCBytes([]byte("data_xxxx"))
-	wait := make(chan struct{})
-	output := make([]byte, 1024)
-
-	total := 1000000
-	go func() {
-		time.Sleep(5 * time.Second)
-		for rlen := 0; rlen < len(input)*total; {
-			n, err := client.Read(output)
-			assert.NoError(t, err, "read failure")
-			rlen += n
-		}
-
-		close(wait)
-	}()
-
-	for i := 0; i <= total; i++ {
-		_, err := desc.write(uscall.Bytes2CSlice(input))
-		assert.NoError(t, err, "write failure")
-	}
-
-	<-wait
-}
-
-func TestDescEcho(t *testing.T) {
-	client := testDail(t)
-	defer client.Close()
-
-	desc := testNewDesc(testAccept(t))
-	defer desc.close()
-
-	go func() {
-		buff := make([]byte, 1024)
-		for {
-			if n, err := client.Read(buff); err != nil {
-				break
-			} else {
-				client.Write(buff[:n])
-			}
-		}
-	}()
-
-	input := testCBytes([]byte("data_xxxx"))
-	output := uscall.AllocCSlice(1024, 1024)
-	for i := 0; i < 2048; i++ {
-		n, err := desc.write(uscall.Bytes2CSlice(input))
-		assert.NoError(t, err, "write failure")
-		assert.Equal(t, len(input), n)
-
-		_, err = desc.read(output)
-		assert.NoError(t, err, "read failure")
-		assert.Equal(t, input, uscall.CSlice2Bytes(output)[:n])
-	}
-}
 
 func TestConnRead(t *testing.T) {
 	client := testDail(t)
@@ -242,6 +127,35 @@ func TestConnEcho(t *testing.T) {
 	}
 }
 
+func TestReadDeadlineException(t *testing.T) {
+	client := testDail(t)
+	conn := testNewConn(testAccept(t))
+
+	// 1. initial less than now
+	conn.SetReadDeadline(time.Now().Add(-1 * time.Second))
+	data := make([]byte, 1024)
+
+	_, err := conn.Read(data)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+
+	// 2. update less than now
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	go conn.SetReadDeadline(time.Now().Add(-1 * time.Second))
+	_, err = conn.Read(data)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+
+	// 3. return EOF error
+	client.Close()
+	conn.SetReadDeadline(time.Time{})
+	_, err = conn.Read(data)
+	assert.EqualError(t, err, io.EOF.Error())
+
+	// 4. return EINVILA
+	conn.Close()
+	_, err = conn.Read(data)
+	assert.EqualError(t, err, syscall.EINVAL.Error())
+}
+
 func TestReadDeadline(t *testing.T) {
 	client := testDail(t)
 	defer client.Close()
@@ -250,7 +164,7 @@ func TestReadDeadline(t *testing.T) {
 	defer conn.Close()
 
 	// 1. peading and wait dealine
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	data := make([]byte, 1024)
 
 	_, err := conn.Read(data)
@@ -266,7 +180,7 @@ func TestReadDeadline(t *testing.T) {
 	// 2. update dealine in pending io
 	go func() {
 		time.Sleep(time.Second)
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	}()
 	_, err = conn.Read(data)
 	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
@@ -275,86 +189,70 @@ func TestReadDeadline(t *testing.T) {
 	_, err = conn.Read(data)
 	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
 
-	// 3. multi-read
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	// 3. update dealine in pending io immediately
+	conn.SetReadDeadline(time.Time{})
+	go conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, err = conn.Read(data)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+
+	// 4. very short duration
+	conn.SetDeadline(time.Now().Add(time.Millisecond))
+	_, err = conn.Read(data)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+
+	conn.SetDeadline(time.Time{})
+	go conn.SetDeadline(time.Now().Add(time.Millisecond))
+	_, err = conn.Read(data)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+}
+
+func TestReadDeadlineMultiConn(t *testing.T) {
+	client := testDail(t)
+	defer client.Close()
+
+	conn := testNewConn(testAccept(t))
+	defer conn.Close()
+
+	data := make([]byte, 1024)
+
+	// 1. multi-read
+	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	wait := make(chan struct{})
 	go func() {
 		conn.Read(data)
 		wait <- struct{}{}
 	}()
-	conn.Read(data)
+	_, err := conn.Read(data)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
 	<-wait
-}
 
-var (
-	poller *netpoller
-	once   sync.Once
-	port   uint = 18090
-	addr        = "127.0.0.1"
-	sockfd int32
-	ttimer = NewTimer()
-)
+	// 2. update deadline
+	conn.SetReadDeadline(time.Time{})
+	go func() {
+		conn.Read(data)
+		wait <- struct{}{}
+	}()
+	go func() {
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	}()
+	_, err = conn.Read(data)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+	<-wait
 
-func testCBytes(data []byte) []byte {
-	dataLen := uint32(len(data))
-	res := uscall.CSlice2Bytes(uscall.AllocCSlice(dataLen, dataLen))
-	copy(res, data)
-	return res
-}
-
-func testDail(t *testing.T) net.Conn {
-	testDescInit()
-
-	client, err := net.Dial("tcp", fmt.Sprintf("%s:%d", addr, port))
-	assert.NoError(t, err, "connect failure.")
-	return client
-}
-
-func testDescInit() {
-	once.Do(func() {
-		var err error
-		poller, err = createNetPoller()
-		if err != nil {
-			panic(err)
-		}
-
-		go poller.poll()
-
-		// create tcp socket
-		sockfd, err = uscall.UscallSocket(uscall.AF_INET, uscall.SOCK_STREAM, 0)
-		if err != nil {
-			panic(err)
-		}
-
-		if err := uscall.UscallSetReusePort(sockfd); err != nil {
-			panic(err)
-		}
-
-		uscall.UscallIoctlNonBio(sockfd, 1)
-
-		// bind address
-		caddr := (&uscall.SockAddr{}).SetFamily(uscall.AF_INET).
-			SetPort(port).SetAddr(addr)
-
-		if _, err = uscall.UscallBind(sockfd, caddr, caddr.AddrLen()); err != nil {
-			panic(err)
-		}
-
-		// listen socket
-		if _, err := uscall.UscallListen(sockfd, 1024); err != nil {
-			uscall.UscallClose(sockfd)
-			panic(err)
-		}
-	})
-}
-
-func testNewDesc(fd int32) *desc {
-	testDescInit()
-	return &desc{
-		fd:         fd,
-		irqHandler: newIrqHandler(),
-		poller:     poller,
-	}
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	go func() {
+		conn.Read(data)
+		wait <- struct{}{}
+	}()
+	go func() {
+		conn.SetReadDeadline(time.Time{})
+		time.Sleep(time.Second)
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	}()
+	_, err = conn.Read(data)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+	<-wait
 }
 
 func testNewConn(fd int32) *conn {
@@ -362,18 +260,9 @@ func testNewConn(fd int32) *conn {
 		fd: testNewDesc(fd),
 		rCtx: connCtx{
 			buffer: newBuffer(8192),
-			t:      ttimer,
 		},
 		wCtx: connCtx{
 			buffer: newBuffer(8192),
-			t:      ttimer,
 		},
 	}
-}
-
-func testAccept(t *testing.T) int32 {
-	fd, err := uscall.UscallAccept(sockfd, nil, nil)
-	assert.NoError(t, err, "accept  failure.")
-	uscall.UscallIoctlNonBio(fd, 1)
-	return fd
 }

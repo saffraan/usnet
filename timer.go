@@ -2,6 +2,7 @@ package usnet
 
 import (
 	"container/heap"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -118,13 +119,13 @@ func (ti *timerImpl) close() {
 }
 
 func (ti *timerImpl) signal() {
-	if !ti.ignore.Load() && len(ti.notify) == 0 {
-		// if len(ti.notify) == 0 {
-		select {
-		case ti.notify <- struct{}{}:
-		default:
-		}
+	// if !ti.ignore.Load() && len(ti.notify) == 0 {
+	// if len(ti.notify) == 0 {
+	select {
+	case ti.notify <- struct{}{}:
+	default:
 	}
+	// }
 }
 
 // find all jobs time  less than now.
@@ -180,6 +181,7 @@ func (ti *timerImpl) proc() {
 }
 
 func (ti *timerImpl) add(j job) task {
+	fmt.Println("add job.....")
 	ti.l.Lock()
 	tt := &Item{job: j}
 	heap.Push(&ti.hs, tt)
@@ -190,6 +192,7 @@ func (ti *timerImpl) add(j job) task {
 }
 
 func (ti *timerImpl) remove(tt task) {
+	fmt.Println("remove job.....")
 	ti.l.Lock()
 	if i, ok := (tt).(*Item); ok {
 		if i.index >= 0 && i.index < len(ti.hs) {

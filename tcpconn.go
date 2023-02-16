@@ -10,7 +10,7 @@ import (
 //
 // Multiple goroutines may invoke methods on a TCPListener simultaneously.
 type TCPListener struct {
-	lisfd  *desc
+	lisfd  *fdesc
 	poller *netpoller
 	addr   *net.TCPAddr
 }
@@ -56,7 +56,7 @@ func createTCPListener(addr *net.TCPAddr) (net.Listener, error) {
 
 	return &TCPListener{
 		poller: poller,
-		lisfd: &desc{
+		lisfd: &fdesc{
 			fd:         sockfd,
 			irqHandler: newIrqHandler(),
 			poller:     poller,
@@ -75,7 +75,7 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 			}
 			return nil, err
 		} else {
-			return NewTCPConn(&desc{
+			return NewTCPConn(&fdesc{
 				fd:         fd,
 				irqHandler: newIrqHandler(),
 				poller:     l.poller,
@@ -107,7 +107,7 @@ type TCPConn struct {
 	conn
 }
 
-func NewTCPConn(fd *desc, addr *uscall.SockAddr) *TCPConn {
+func NewTCPConn(fd *fdesc, addr *uscall.SockAddr) *TCPConn {
 	return &TCPConn{
 		conn: conn{
 			fd: fd,

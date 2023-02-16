@@ -28,7 +28,7 @@ func (p *netpoller) close() {
 	}
 }
 
-func (p *netpoller) ctl_add(fd *desc, ev *uscall.Epoll_event) error {
+func (p *netpoller) ctl_add(fd *fdesc, ev *uscall.Epoll_event) error {
 	if _, err := uscall.UscallEpollCtl(p.epfd, uscall.EPOLL_CTL_ADD, fd.fd, ev); err != nil {
 		return err
 	}
@@ -36,7 +36,7 @@ func (p *netpoller) ctl_add(fd *desc, ev *uscall.Epoll_event) error {
 	return nil
 }
 
-func (p *netpoller) ctl_modify(fd *desc, ev *uscall.Epoll_event) error {
+func (p *netpoller) ctl_modify(fd *fdesc, ev *uscall.Epoll_event) error {
 	if _, ok := p.fdIndexs.Load(fd.fd); !ok {
 		return errors.New("the specify fd has not been added into poller")
 	}
@@ -46,7 +46,7 @@ func (p *netpoller) ctl_modify(fd *desc, ev *uscall.Epoll_event) error {
 	return nil
 }
 
-func (p *netpoller) ctl_delete(fd *desc, ev *uscall.Epoll_event) error {
+func (p *netpoller) ctl_delete(fd *fdesc, ev *uscall.Epoll_event) error {
 	if _, ok := p.fdIndexs.LoadAndDelete(fd.fd); !ok {
 		return errors.New("the specify fd has not been added into poller")
 	}
@@ -57,11 +57,11 @@ func (p *netpoller) ctl_delete(fd *desc, ev *uscall.Epoll_event) error {
 }
 
 func (p *netpoller) handle(ev *uscall.Epoll_event) {
-	var efd *desc
+	var efd *fdesc
 	if fd, ok := p.fdIndexs.Load(ev.Socket()); !ok {
 		return
 	} else {
-		efd = fd.(*desc)
+		efd = fd.(*fdesc)
 	}
 
 	if ev.Event()&uscall.EPOLLIN != 0 {
