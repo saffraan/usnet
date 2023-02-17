@@ -39,8 +39,9 @@ func main() {
 		panic(err)
 	}
 
-	uscall.UscallRun(func(p unsafe.Pointer) {
+	uscall.UscallRun(func(p unsafe.Pointer) int32 {
 		loop(int32(epfd), sockfd)
+		return 0
 	}, nil)
 	_ = res
 }

@@ -19,6 +19,7 @@ const (
 	INT_SIG_INPUT INT_SIGNAL = iota
 	INT_SIG_OUTPUT
 	INT_SIG_TIMEOUT
+	INT_SIG_EXP
 )
 
 // interrupt request
@@ -26,9 +27,13 @@ type irq struct {
 	src INT_SOURCE // the source of  interrupt signal
 	sig INT_SIGNAL // the
 	seq int64
-	err error // happend error
-	any interface{}
 	le  *list.Element
+
+	retry int
+	err   error // happend error
+	any   interface{}
+	ih    UscallHandler
+	reg   UscallRegister
 }
 
 func (i *irq) Error() error {
@@ -118,7 +123,7 @@ func errorWrapMf(m matchFunc, err error) matchFunc {
 // else tigger the first irq  match the signal . Ops must be fast, fast and fast.
 func (in *irqHandler) interrupt(iSrc INT_SOURCE, mf matchFunc, all bool, ops ...func()) {
 	in.Lock()
-	defer in.Unlock()
+	// defer in.Unlock()
 
 	// must call op before signal broadcast
 	for _, op := range ops {
@@ -128,10 +133,48 @@ func (in *irqHandler) interrupt(iSrc INT_SOURCE, mf matchFunc, all bool, ops ...
 	for i := in.irqList.Front(); i != nil; i = i.Next() {
 		if ii := i.Value.(*irq); mf(ii) {
 			ii.src = iSrc
+			in.irqList.Remove(i)
 			if !all {
 				break
 			}
 		}
 	}
+	in.Unlock()
 	in.Cond.Broadcast()
+}
+
+type irqRegister sync.Map
+
+func (ir *irqRegister) Save(i *irq) {
+	(*sync.Map)(ir).Store(i, struct{}{})
+}
+
+func (ir *irqRegister) Remove(i *irq) {
+	(*sync.Map)(ir).Delete(i)
+}
+
+func (ir *irqRegister) Range(f func(*irq) bool) {
+	(*sync.Map)(ir).Range(func(key, value any) bool {
+		if i, ok := key.(*irq); ok {
+			return f(i)
+		}
+		return true
+	})
+}
+
+/********************************interface define *******************/
+type UscallController interface {
+	Serve(*irq)
+}
+
+type UscallHandler interface {
+	Handle(*irq) (again bool)
+	Error(*irq, error)
+}
+
+type UscallRegister interface {
+	Save(*irq)
+	Remove(*irq)
+	Range(func(*irq) bool)
+	FD() int32
 }

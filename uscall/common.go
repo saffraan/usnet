@@ -22,11 +22,12 @@ const (
 	EPOLLIN       = uint32(C.EPOLLIN)
 	EPOLLOUT      = uint32(C.EPOLLOUT)
 	EPOLL_CTL_ADD = int32(C.EPOLL_CTL_ADD)
+	EPOLL_CTL_MOD = int32(C.EPOLL_CTL_MOD)
 	EPOLL_CTL_DEL = int32(C.EPOLL_CTL_DEL)
 	EPOLLERR      = uint32(C.EPOLLERR)
 )
 
-type LoopFunc func(unsafe.Pointer)
+type LoopFunc func(unsafe.Pointer) int32
 
 type Epoll_event C.struct_epoll_event
 

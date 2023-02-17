@@ -30,8 +30,7 @@ func UscallEpollWait(epfd int32, events *Epoll_event, maxevents, timeout int32) 
 func UscallRun(loop LoopFunc, arg unsafe.Pointer) {
 	lp := NewLoopParams()
 	lp.BindProc(func() int32 {
-		loop(arg)
-		return 0
+		return loop(arg)
 	})
 	C.ff_run_wrap(unsafe.Pointer(lp))
 }

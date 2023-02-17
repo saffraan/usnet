@@ -50,6 +50,10 @@ func (b *buffer) Data() []byte {
 	return b.shadow[b.pos : b.pos+b.len]
 }
 
+func (b *buffer) CData() *uscall.CSlice {
+	return uscall.Bytes2CSlice(b.Data())
+}
+
 func (b *buffer) Read(dst []byte) (clen int) {
 	data := b.shadow[b.pos : b.len+b.pos]
 	if clen = copy(dst, data); clen < len(data) {

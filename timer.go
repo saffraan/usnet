@@ -27,7 +27,7 @@ func (j *jobImpl) run() {
 }
 
 type timer interface {
-	add(j job) task
+	add(job) task
 	remove(task)
 	// update: if the task has been execced, re-add the task.
 	update(task, job)
@@ -119,13 +119,12 @@ func (ti *timerImpl) close() {
 }
 
 func (ti *timerImpl) signal() {
-	// if !ti.ignore.Load() && len(ti.notify) == 0 {
-	// if len(ti.notify) == 0 {
-	select {
-	case ti.notify <- struct{}{}:
-	default:
+	if !ti.ignore.Load() && len(ti.notify) == 0 {
+		select {
+		case ti.notify <- struct{}{}:
+		default:
+		}
 	}
-	// }
 }
 
 // find all jobs time  less than now.

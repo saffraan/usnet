@@ -19,13 +19,13 @@ Deadline Context of file descriptions.
 type fdlCtx struct {
 	l sync.RWMutex
 
-	deadline time.Time
+	deadline time.Time // update in UpdateDeadline
 	// when deadline execeeded, lazy modify in DealineExceeded
 	// reset in UpdateDeadline
-	dead bool
+	dead   bool
+	dlSeq  int64
+	dlFunc func() // update in UpdateDeadline
 
-	dlSeq   int64
-	dlFunc  func()
 	dlTimer timer
 	// Task is must nil when the deadline is zero.
 	// and  is lazy inited in UpdateDeadline and fd.prepare when the fd is refered.
@@ -165,6 +165,12 @@ type fdesc struct {
 
 	poller *netpoller
 	ev     *uscall.Epoll_event
+
+	*irqRegister
+}
+
+func (fd *fdesc) FD() int32 {
+	return fd.fd
 }
 
 func (fd *fdesc) incref(mode int) {
@@ -216,7 +222,8 @@ func (fd *fdesc) netpoller_delete_event(ref *int64, event uint32) error {
 			return nil
 		}
 
-		if nev := fd.ev.Event() & ^event; nev == uscall.EPOLLERR {
+		// if nev := fd.ev.Event() & ^event; nev == uscall.EPOLLERR {
+		if nev := fd.ev.Event() & ^event; fd.status&CLOSED != 0 {
 			fd.poller.ctl_delete(fd, fd.ev)
 			fd.ev = nil
 		} else {
@@ -254,6 +261,9 @@ func (fd *fdesc) checkStatus(notice FD_STATUS, autoClean bool) bool {
 func (fd *fdesc) suspend(mode int) error {
 	var status FD_STATUS
 	var iReq irq
+
+	// runtime.LockOSThread()
+	// defer runtime.UnlockOSThread()
 
 	// bind the event into netpoller
 	if mode == 'r' {
@@ -297,37 +307,21 @@ func (fd *fdesc) eofError(n int, err error) error {
 
 // read: return read length [0, ~)， error
 func (fd *fdesc) read(cs *uscall.CSlice) (int, error) {
-	for {
-		nread, err := uscall.UscallReadCSlice(fd.fd, cs)
-		if err != nil {
-			nread = 0                  // Note: set zero
-			if err == syscall.EAGAIN { // try again
-				if err = fd.suspend('r'); err == nil { // enter block or wait deadline.
-					continue
-				}
-			}
-		}
-		return nread, fd.eofError(nread, err)
+	nread, err := uscall.UscallReadCSlice(fd.fd, cs)
+	if err != nil {
+		nread = 0 // Note: set zero
 	}
+	return nread, fd.eofError(nread, err)
 }
 
 // read: write written length [0, ~)， error
-func (fd *fdesc) write(cs *uscall.CSlice) (int, error) {
-	for {
-		if nwrite, err := uscall.UscallWriteCSlice(fd.fd, cs); nwrite > 0 {
-			return nwrite, err
-		} else if err != nil {
-			if err == syscall.EAGAIN { // try again
-				// enter block or wait deadline.
-				if err = fd.suspend('w'); err == nil {
-					continue
-				}
-			}
-			return 0, err
-		} else if nwrite == 0 {
-			return 0, io.ErrUnexpectedEOF
-		}
+func (fd *fdesc) write(cs *uscall.CSlice) (nwrite int, err error) {
+	if nwrite, err = uscall.UscallWriteCSlice(fd.fd, cs); err != nil {
+		nwrite = 0
+	} else if nwrite == 0 {
+		err = io.ErrUnexpectedEOF
 	}
+	return
 }
 
 func (fd *fdesc) close() (err error) {

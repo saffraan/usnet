@@ -127,7 +127,7 @@ func TestConnEcho(t *testing.T) {
 	}
 }
 
-func TestReadDeadlineException(t *testing.T) {
+func TestConnReadDeadlineException(t *testing.T) {
 	client := testDail(t)
 	conn := testNewConn(testAccept(t))
 
@@ -147,16 +147,18 @@ func TestReadDeadlineException(t *testing.T) {
 	// 3. return EOF error
 	client.Close()
 	conn.SetReadDeadline(time.Time{})
-	_, err = conn.Read(data)
+	n, err := conn.Read(data)
 	assert.EqualError(t, err, io.EOF.Error())
+	assert.Equal(t, n, 0)
 
 	// 4. return EINVILA
 	conn.Close()
-	_, err = conn.Read(data)
+	n, err = conn.Read(data)
 	assert.EqualError(t, err, syscall.EINVAL.Error())
+	assert.Equal(t, n, 0)
 }
 
-func TestReadDeadline(t *testing.T) {
+func TestConnReadDeadline(t *testing.T) {
 	client := testDail(t)
 	defer client.Close()
 
@@ -206,7 +208,7 @@ func TestReadDeadline(t *testing.T) {
 	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
 }
 
-func TestReadDeadlineMultiConn(t *testing.T) {
+func TestConnReadDeadlineMultiConn(t *testing.T) {
 	client := testDail(t)
 	defer client.Close()
 
@@ -255,6 +257,173 @@ func TestReadDeadlineMultiConn(t *testing.T) {
 	<-wait
 }
 
+func TestConnWriteDeadlineMultiConn(t *testing.T) {
+	client := testDail(t)
+	defer client.Close()
+
+	conn := testNewConn(testAccept(t))
+	defer conn.Close()
+
+	input := []byte("data_xxxx")
+	wait := make(chan struct{})
+
+	// 1. multi-read
+	{
+		t.Log("multi-write")
+		total := 1000000
+		conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+		go func() {
+			for i := 0; i <= total; i++ {
+				if _, err := conn.Write(input); err != nil {
+					assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+					break
+				}
+			}
+			wait <- struct{}{}
+		}()
+		for i := 0; i <= total; i++ {
+			if _, err := conn.Write(input); err != nil {
+				assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+				break
+			}
+		}
+		<-wait
+	}
+
+	// 2. update deadline
+	{
+		t.Log("update deadline")
+		conn.SetWriteDeadline(time.Time{})
+		go func() {
+			conn.Write(input)
+			wait <- struct{}{}
+		}()
+		go func() {
+			conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+		}()
+		_, err := conn.Write(input)
+		assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+		<-wait
+	}
+
+	// 3. update deadline in pending
+	{
+		t.Log("update deadline in pending")
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		go func() {
+			conn.Write(input)
+			wait <- struct{}{}
+		}()
+		go func() {
+			conn.SetWriteDeadline(time.Time{})
+			time.Sleep(time.Second)
+			conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+		}()
+		_, err := conn.Write(input)
+		assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+		<-wait
+	}
+}
+
+func TestConnWriteDeadline(t *testing.T) {
+	client := testDail(t)
+	defer client.Close()
+
+	conn := testNewConn(testAccept(t))
+	defer conn.Close()
+
+	input := []byte("data_xxxx")
+
+	// 1. set write dealine
+	conn.SetWriteDeadline(time.Now().Add(time.Second))
+	total := 1000000
+	for i := 0; i <= total; i++ {
+		if _, err := conn.Write(input); err != nil {
+			assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+			break
+		}
+	}
+
+	_, err := conn.Write(input)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+
+	// 2. update write deadline
+	conn.SetWriteDeadline(time.Time{})
+	go func() {
+		time.Sleep(time.Second)
+		conn.SetWriteDeadline(time.Now())
+	}()
+	_, err = conn.Write(input)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+
+	// 3. update dealine in pending io immediately
+	conn.SetWriteDeadline(time.Time{})
+	go conn.SetWriteDeadline(time.Now().Add(time.Second))
+	_, err = conn.Write(input)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+
+	// 4. very short duration
+	conn.SetWriteDeadline(time.Now().Add(time.Millisecond))
+	_, err = conn.Write(input)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+
+	conn.SetWriteDeadline(time.Time{})
+	go conn.SetWriteDeadline(time.Now().Add(time.Millisecond))
+	_, err = conn.Write(input)
+	assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+}
+
+func TestConnWriteDeadlineException(t *testing.T) {
+	client := testDail(t)
+	conn := testNewConn(testAccept(t))
+
+	input := []byte("data_xxxx")
+	// 1. initial less than now
+	{
+		t.Log("initial less than now")
+		conn.SetWriteDeadline(time.Now().Add(-1 * time.Second))
+		_, err := conn.Write(input)
+		assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+	}
+
+	// 2. update less than now
+	{
+		t.Log("update less than now")
+		// conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		conn.SetWriteDeadline(time.Time{})
+		go func() {
+			conn.SetWriteDeadline(time.Now().Add(-1 * time.Second))
+		}()
+		total := 1000000
+		for i := 0; i <= total; i++ {
+			if _, err := conn.Write(input); err != nil {
+				assert.EqualError(t, err, os.ErrDeadlineExceeded.Error())
+				break
+			}
+		}
+	}
+
+	// 3. return EOF error
+	{
+		t.Log("return EOF error")
+		client.Close()
+		conn.SetWriteDeadline(time.Time{})
+		n, err := conn.Write(input)
+		assert.EqualError(t, err, syscall.ECONNRESET.Error())
+		assert.Equal(t, 0, n)
+	}
+
+	// 4. return EINVILA
+	{
+		t.Log("return EINVILA")
+		conn.Close()
+		n, err := conn.Write(input)
+		assert.EqualError(t, err, syscall.EINVAL.Error())
+		assert.Equal(t, 0, n)
+	}
+}
+
 func testNewConn(fd int32) *conn {
 	return &conn{
 		fd: testNewDesc(fd),
@@ -264,5 +433,6 @@ func testNewConn(fd int32) *conn {
 		wCtx: connCtx{
 			buffer: newBuffer(8192),
 		},
+		utrl: utrl,
 	}
 }

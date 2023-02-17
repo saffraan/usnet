@@ -136,6 +136,7 @@ func testNewDesc(fd int32) *fdesc {
 		wdCtx: fdlCtx{
 			dlTimer: ttimer,
 		},
+		irqRegister: &irqRegister{},
 	}
 }
 
@@ -147,7 +148,8 @@ func testDescInit() {
 			panic(err)
 		}
 
-		go poller.poll()
+		utrl = NewUscallController(poller)
+		go utrl.proc()
 
 		// create tcp socket
 		sockfd, err = uscall.UscallSocket(uscall.AF_INET, uscall.SOCK_STREAM, 0)
@@ -200,6 +202,7 @@ func testAccept(t *testing.T) int32 {
 }
 
 var (
+	utrl   *uscallController
 	poller *netpoller
 	once   sync.Once
 	port   uint = 18090

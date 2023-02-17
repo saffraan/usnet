@@ -3,6 +3,7 @@ package usnet
 import (
 	"net"
 	"sync"
+	"syscall"
 	"time"
 	"usnet/uscall"
 )
@@ -18,6 +19,7 @@ type conn struct {
 	rCtx, wCtx connCtx
 	// local addr
 	// remote addr
+	utrl UscallController
 }
 
 func (c *conn) prepare(mode int) error {
@@ -50,7 +52,7 @@ func (c *conn) safeRead(b []byte) (n int, err error) {
 		for buff, next := ctx.buffer, true; next; ctx.seq++ {
 			if buff.Len() <= 0 { // First, Fill read buffer if the buffer is empty.
 				var nread = 0
-				if nread, err = c.fd.read(buff.entity); err != nil {
+				if nread, err = c.read(); err != nil {
 					return
 				}
 				buff.setLen(nread)
@@ -80,6 +82,38 @@ func (c *conn) Write(b []byte) (clen int, err error) {
 	return c.safeWrite(b)
 }
 
+func (c *conn) read() (int, error) {
+	iReq := &irq{ih: &connHandler{conn: c}, reg: c.fd, sig: INT_SIG_INPUT}
+
+	c.fd.trap(iReq)         // enter trap
+	defer c.fd.untrap(iReq) // leave trap
+
+	if err := c.fd.isOk('r'); err != nil {
+		return 0, err
+	}
+
+	c.utrl.Serve(iReq)
+	err := c.fd.listen(iReq)
+	n, _ := iReq.any.(int)
+	return n, err
+}
+
+func (c *conn) write() (int, error) {
+	iReq := &irq{ih: &connHandler{conn: c}, reg: c.fd, sig: INT_SIG_OUTPUT}
+
+	c.fd.trap(iReq)         // enter trap
+	defer c.fd.untrap(iReq) // leave trap
+
+	if err := c.fd.isOk('w'); err != nil {
+		return 0, err
+	}
+
+	c.utrl.Serve(iReq)
+	err := c.fd.listen(iReq)
+	n, _ := iReq.any.(int)
+	return n, err
+}
+
 func (c *conn) safeWrite(b []byte) (clen int, err error) {
 	ctx := &c.wCtx
 	ctx.l.Lock()
@@ -93,7 +127,7 @@ func (c *conn) safeWrite(b []byte) (clen int, err error) {
 			}
 
 			var nwrite int
-			if nwrite, err = c.fd.write(uscall.Bytes2CSlice(buff.Data())); nwrite > 0 { // Second: write data
+			if nwrite, err = c.write(); nwrite > 0 { // Second: write data
 				clen += nwrite
 				buff.move(nwrite)
 			}
@@ -106,7 +140,13 @@ func (c *conn) safeWrite(b []byte) (clen int, err error) {
 // Close closes the connection.
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (c *conn) Close() error {
-	return c.fd.close()
+	iReq := &irq{ih: &closeHandler{fd: c.fd}}
+
+	c.fd.trap(iReq)
+	defer c.fd.untrap(iReq)
+
+	c.utrl.Serve(iReq)
+	return c.fd.listen(iReq)
 }
 
 // LocalAddr returns the local network address, if known.
@@ -163,3 +203,105 @@ func (c *conn) SetWriteDeadline(t time.Time) error {
 	c.fd.setWriteDeadline(t)
 	return nil
 }
+
+// connHandler implement UscallHandler
+type connHandler struct {
+	*conn
+}
+
+func (c *connHandler) Error(iReq *irq, err error) {
+	var ref *int64
+	var event uint32
+
+	switch iReq.sig {
+	case INT_SIG_INPUT:
+		{
+			ref, event = &c.fd.rwaits, (uscall.EPOLLIN)
+		}
+	case INT_SIG_OUTPUT:
+		{
+			ref, event = &c.fd.wwaits, uscall.EPOLLOUT
+		}
+	default:
+	}
+
+	iReq.err = err
+	if iReq.retry > 0 {
+		c.fd.netpoller_delete_event(ref, event)
+	}
+	c.fd.interrupt(INT_SRC_POLLER, func(i *irq) bool {
+		return i.seq == iReq.seq
+	}, false)
+}
+
+func (c *connHandler) Handle(iReq *irq) (callback bool) {
+	if iReq == nil {
+		return
+	}
+
+	var ref *int64
+	var event uint32
+	callback = true
+
+	switch iReq.sig {
+	case INT_SIG_INPUT:
+		{
+			ref, event = &c.fd.rwaits, (uscall.EPOLLIN)
+			if err := c.fd.isOk('r'); err != nil {
+				iReq.err = err
+				goto connHandleEnd
+			}
+
+			if nread, err := c.fd.read(c.rCtx.entity); err == syscall.EAGAIN {
+				callback = false
+			} else {
+				iReq.any, iReq.err = nread, err
+			}
+		}
+	case INT_SIG_OUTPUT:
+		{
+			ref, event = &c.fd.wwaits, uscall.EPOLLOUT
+			if err := c.fd.isOk('w'); err != nil {
+				iReq.err = err
+				goto connHandleEnd
+			}
+
+			if nwrite, err := c.fd.write(c.wCtx.CData()); err == syscall.EAGAIN { // Second: write data
+				callback = false
+			} else {
+				iReq.any, iReq.err = nwrite, err
+			}
+		}
+	default:
+	}
+
+connHandleEnd:
+	if callback {
+		if iReq.retry > 0 {
+			c.fd.netpoller_delete_event(ref, event)
+		}
+		c.fd.interrupt(INT_SRC_POLLER, func(i *irq) bool {
+			return i.seq == iReq.seq
+		}, false)
+	} else {
+		if iReq.retry == 0 {
+			c.fd.netpoller_add_event(ref, event)
+		}
+		iReq.retry++
+	}
+	return
+}
+
+type closeHandler struct {
+	fd *fdesc
+}
+
+func (ch *closeHandler) Handle(iReq *irq) bool {
+	ch.fd.close()
+	ch.fd.interrupt(INT_SRC_POLLER, func(i *irq) bool {
+		return true // match all interrupt request.
+	}, true)
+	return true
+}
+
+func (ch *closeHandler) Error(iReq *irq, err error) {}
